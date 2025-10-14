@@ -50,14 +50,16 @@ def parse_trial_plan(df):
 
 def parse_assessment_sheet(df, sheet_name, treatment_map):
     """Parse individual assessment sheet"""
-    # Find header row
+    # Find header row - look for any variation of column names
     header_row = None
-    for idx, row in df.iterrows():
-        if 'Block!' in str(row.values):
+    for idx in range(min(10, len(df))):  # Check first 10 rows
+        row_str = ' '.join([str(val) for val in df.iloc[idx].values if pd.notna(val)])
+        if 'Block' in row_str and 'Plot' in row_str and 'Treat' in row_str:
             header_row = idx
             break
     
     if header_row is None:
+        st.warning(f"Could not find header row in sheet: {sheet_name}")
         return None
     
     # Get data
@@ -65,15 +67,43 @@ def parse_assessment_sheet(df, sheet_name, treatment_map):
     data_rows = df.iloc[header_row + 1:].copy()
     data_rows.columns = headers
     
-    # Filter valid rows
-    data_rows = data_rows[pd.notna(data_rows['Block!'])]
+    # Find the block column (might be 'Block!', 'Block', etc.)
+    block_col = None
+    plot_col = None
+    treat_col = None
     
-    # Rename columns
-    data_rows = data_rows.rename(columns={
-        'Block!': 'Block',
-        'Plot!': 'Plot',
-        'Treat1!': 'Treatment'
-    })
+    for col in data_rows.columns:
+        col_str = str(col).lower()
+        if 'block' in col_str:
+            block_col = col
+        elif 'plot' in col_str:
+            plot_col = col
+        elif 'treat' in col_str:
+            treat_col = col
+    
+    if block_col is None or plot_col is None or treat_col is None:
+        st.warning(f"Could not find required columns in sheet: {sheet_name}")
+        return None
+    
+    # Filter valid rows (has block number)
+    data_rows = data_rows[pd.notna(data_rows[block_col])]
+    
+    # Rename columns to standard names
+    rename_dict = {
+        block_col: 'Block',
+        plot_col: 'Plot',
+        treat_col: 'Treatment'
+    }
+    data_rows = data_rows.rename(columns=rename_dict)
+    
+    # Convert Treatment to int if possible
+    try:
+        data_rows['Treatment'] = pd.to_numeric(data_rows['Treatment'], errors='coerce')
+        data_rows = data_rows[pd.notna(data_rows['Treatment'])]
+        data_rows['Treatment'] = data_rows['Treatment'].astype(int)
+    except:
+        st.warning(f"Could not convert Treatment column in sheet: {sheet_name}")
+        return None
     
     # Add treatment names
     data_rows['Treatment_Name'] = data_rows['Treatment'].map(treatment_map)
@@ -282,26 +312,50 @@ with col2:
 if uploaded_file is not None:
     
     with st.spinner("Loading file..."):
-        # Read Excel file
-        xl_file = pd.ExcelFile(uploaded_file)
-        
-        # Parse Trial Plan
-        if 'Trial Plan' in xl_file.sheet_names:
-            trial_plan = pd.read_excel(uploaded_file, sheet_name='Trial Plan', header=None)
-            st.session_state.treatment_map = parse_trial_plan(trial_plan)
-        
-        # Parse assessment sheets
-        date_sheets = [s for s in xl_file.sheet_names 
-                      if s not in ['Trial Plan', 'Sheet1'] and '.' in s]
-        
-        raw_data = {}
-        for sheet_name in date_sheets:
-            df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None)
-            parsed_data = parse_assessment_sheet(df, sheet_name, st.session_state.treatment_map)
-            if parsed_data is not None:
-                raw_data[sheet_name] = parsed_data
-        
-        st.session_state.raw_data = raw_data
+        try:
+            # Read Excel file
+            xl_file = pd.ExcelFile(uploaded_file)
+            
+            st.write("**Debug: Sheet names found:**")
+            st.write(xl_file.sheet_names)
+            
+            # Parse Trial Plan
+            if 'Trial Plan' in xl_file.sheet_names:
+                trial_plan = pd.read_excel(uploaded_file, sheet_name='Trial Plan', header=None)
+                st.session_state.treatment_map = parse_trial_plan(trial_plan)
+                st.write(f"**Debug: Treatments found:** {st.session_state.treatment_map}")
+            else:
+                st.error("No 'Trial Plan' sheet found!")
+                st.stop()
+            
+            # Parse assessment sheets
+            date_sheets = [s for s in xl_file.sheet_names 
+                          if s not in ['Trial Plan', 'Sheet1']]
+            
+            st.write(f"**Debug: Assessment sheets to process:** {date_sheets}")
+            
+            raw_data = {}
+            for sheet_name in date_sheets:
+                df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None)
+                parsed_data = parse_assessment_sheet(df, sheet_name, st.session_state.treatment_map)
+                if parsed_data is not None and len(parsed_data) > 0:
+                    raw_data[sheet_name] = parsed_data
+                    st.write(f"✓ Loaded {sheet_name}: {len(parsed_data)} plots")
+                else:
+                    st.warning(f"⚠ Could not parse sheet: {sheet_name}")
+            
+            st.session_state.raw_data = raw_data
+            st.write(f"**Debug: Total sheets loaded:** {len(raw_data)}")
+            
+            if len(raw_data) == 0:
+                st.error("No assessment data could be loaded from any sheets!")
+                st.stop()
+                
+        except Exception as e:
+            st.error(f"Error loading file: {str(e)}")
+            st.write("**Full error:**")
+            st.exception(e)
+            st.stop()
     
     # Display file info
     st.success("✓ File loaded successfully!")
