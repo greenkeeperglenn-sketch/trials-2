@@ -113,43 +113,61 @@ def parse_assessment_sheet(df, sheet_name, treatment_map):
 
 def calculate_fishers_lsd(data, parameter, alpha=0.05):
     """Calculate Fisher's LSD and assign letter groups"""
-    treatments = data['Treatment'].unique()
-    n_treatments = len(treatments)
-    
-    # Get group data
-    groups = [data[data['Treatment'] == t][parameter].values for t in treatments]
-    means = {t: data[data['Treatment'] == t][parameter].mean() for t in treatments}
-    
-    # Calculate MSE
-    grand_mean = data[parameter].mean()
-    ss_within = sum([sum((g - means[t])**2) for t, g in zip(treatments, groups)])
-    df_within = len(data) - n_treatments
-    mse = ss_within / df_within
-    
-    # Calculate n per treatment
-    n_per_treatment = len(groups[0])
-    
-    # Calculate LSD
-    t_critical = stats.t.ppf(1 - alpha/2, df_within)
-    lsd = t_critical * np.sqrt(2 * mse / n_per_treatment)
-    
-    # Assign letter groups (simplified)
-    sorted_treatments = sorted(means.items(), key=lambda x: x[1], reverse=True)
-    letter_groups = {}
-    
-    for i, (t1, mean1) in enumerate(sorted_treatments):
-        letters = set()
-        for j, (t2, mean2) in enumerate(sorted_treatments):
-            if abs(mean1 - mean2) <= lsd:
-                if t2 in letter_groups:
-                    letters.update(letter_groups[t2])
+    try:
+        treatments = data['Treatment'].unique()
+        n_treatments = len(treatments)
         
-        if not letters:
-            letters = {chr(ord('a') + len(set(letter_groups.values())))}
+        # Get group data
+        groups = [data[data['Treatment'] == t][parameter].values for t in treatments]
+        means = {t: data[data['Treatment'] == t][parameter].mean() for t in treatments}
         
-        letter_groups[t1] = ''.join(sorted(letters))
-    
-    return lsd, letter_groups
+        # Check for variation
+        all_values = np.concatenate(groups)
+        if len(np.unique(all_values)) == 1:
+            # No variation - all same
+            return None, {t: 'a' for t in treatments}
+        
+        # Calculate MSE
+        grand_mean = data[parameter].mean()
+        ss_within = sum([sum((g - means[t])**2) for t, g in zip(treatments, groups)])
+        df_within = len(data) - n_treatments
+        
+        if df_within <= 0 or ss_within == 0:
+            return None, {t: 'a' for t in treatments}
+        
+        mse = ss_within / df_within
+        
+        # Calculate n per treatment
+        n_per_treatment = len(groups[0])
+        
+        if n_per_treatment == 0 or mse == 0:
+            return None, {t: 'a' for t in treatments}
+        
+        # Calculate LSD
+        t_critical = stats.t.ppf(1 - alpha/2, df_within)
+        lsd = t_critical * np.sqrt(2 * mse / n_per_treatment)
+        
+        # Assign letter groups (simplified)
+        sorted_treatments = sorted(means.items(), key=lambda x: x[1], reverse=True)
+        letter_groups = {}
+        
+        for i, (t1, mean1) in enumerate(sorted_treatments):
+            letters = set()
+            for j, (t2, mean2) in enumerate(sorted_treatments):
+                if abs(mean1 - mean2) <= lsd:
+                    if t2 in letter_groups:
+                        letters.update(letter_groups[t2])
+            
+            if not letters:
+                letters = {chr(ord('a') + len(set(letter_groups.values())))}
+            
+            letter_groups[t1] = ''.join(sorted(letters))
+        
+        return lsd, letter_groups
+        
+    except Exception as e:
+        st.warning(f"Error in Fisher's LSD calculation: {str(e)}")
+        return None, {t: 'a' for t in data['Treatment'].unique()}
 
 def analyze_data(raw_data, treatment_map, parameters, alpha=0.05):
     """Run statistical analysis"""
@@ -192,21 +210,45 @@ def analyze_data(raw_data, treatment_map, parameters, alpha=0.05):
             treatment_groups = [g for g in treatment_groups if len(g) > 0]
             
             if len(treatment_groups) > 1:
-                f_stat, p_value = stats.f_oneway(*treatment_groups)
-                
-                if p_value < alpha:
-                    lsd_value, letter_groups = calculate_fishers_lsd(date_data, parameter, alpha)
+                try:
+                    # Check if there's any variation in the data
+                    all_values = np.concatenate(treatment_groups)
+                    if len(np.unique(all_values)) == 1:
+                        # All values are identical - no variation
+                        param_results['statistics'][date] = {
+                            'p_value': None,
+                            'f_stat': None,
+                            'lsd': None,
+                            'significant': False
+                        }
+                        param_results['letter_groups'][date] = {t: 'ns' for t in means.index}
+                        continue
+                    
+                    f_stat, p_value = stats.f_oneway(*treatment_groups)
+                    
+                    if p_value < alpha:
+                        lsd_value, letter_groups = calculate_fishers_lsd(date_data, parameter, alpha)
+                        param_results['statistics'][date] = {
+                            'p_value': p_value,
+                            'f_stat': f_stat,
+                            'lsd': lsd_value,
+                            'significant': True
+                        }
+                        param_results['letter_groups'][date] = letter_groups
+                    else:
+                        param_results['statistics'][date] = {
+                            'p_value': p_value,
+                            'f_stat': f_stat,
+                            'lsd': None,
+                            'significant': False
+                        }
+                        param_results['letter_groups'][date] = {t: 'ns' for t in means.index}
+                        
+                except Exception as e:
+                    st.warning(f"Error calculating statistics for {parameter} on {date}: {str(e)}")
                     param_results['statistics'][date] = {
-                        'p_value': p_value,
-                        'f_stat': f_stat,
-                        'lsd': lsd_value,
-                        'significant': True
-                    }
-                    param_results['letter_groups'][date] = letter_groups
-                else:
-                    param_results['statistics'][date] = {
-                        'p_value': p_value,
-                        'f_stat': f_stat,
+                        'p_value': None,
+                        'f_stat': None,
                         'lsd': None,
                         'significant': False
                     }
