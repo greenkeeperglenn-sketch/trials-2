@@ -112,9 +112,9 @@ def parse_assessment_sheet(df, sheet_name, treatment_map):
     return data_rows
 
 def calculate_fishers_lsd(data, parameter, alpha=0.05):
-    """Calculate Fisher's LSD and assign letter groups"""
+    """Calculate Fisher's LSD and assign letter groups using proper algorithm"""
     try:
-        treatments = data['Treatment'].unique()
+        treatments = sorted(data['Treatment'].unique())
         n_treatments = len(treatments)
         
         # Get group data
@@ -124,20 +124,16 @@ def calculate_fishers_lsd(data, parameter, alpha=0.05):
         # Check for variation
         all_values = np.concatenate(groups)
         if len(np.unique(all_values)) == 1:
-            # No variation - all same
             return None, {t: 'a' for t in treatments}
         
         # Calculate MSE
-        grand_mean = data[parameter].mean()
-        ss_within = sum([sum((g - means[t])**2) for t, g in zip(treatments, groups)])
+        ss_within = sum([np.sum((group - means[t])**2) for t, group in zip(treatments, groups)])
         df_within = len(data) - n_treatments
         
         if df_within <= 0 or ss_within == 0:
             return None, {t: 'a' for t in treatments}
         
         mse = ss_within / df_within
-        
-        # Calculate n per treatment
         n_per_treatment = len(groups[0])
         
         if n_per_treatment == 0 or mse == 0:
@@ -147,26 +143,53 @@ def calculate_fishers_lsd(data, parameter, alpha=0.05):
         t_critical = stats.t.ppf(1 - alpha/2, df_within)
         lsd = t_critical * np.sqrt(2 * mse / n_per_treatment)
         
-        # Assign letter groups (simplified)
-        sorted_treatments = sorted(means.items(), key=lambda x: x[1], reverse=True)
+        # Proper letter grouping algorithm
+        sorted_means = sorted(means.items(), key=lambda x: x[1], reverse=True)
         letter_groups = {}
+        current_letter = 0
         
-        for i, (t1, mean1) in enumerate(sorted_treatments):
-            letters = set()
-            for j, (t2, mean2) in enumerate(sorted_treatments):
+        for i, (t1, mean1) in enumerate(sorted_means):
+            # Find all treatments not significantly different from this one
+            group_letters = set()
+            
+            for j, (t2, mean2) in enumerate(sorted_means):
                 if abs(mean1 - mean2) <= lsd:
+                    # Not significantly different
                     if t2 in letter_groups:
-                        letters.update(letter_groups[t2])
+                        # Already has letters, add them
+                        group_letters.update(letter_groups[t2])
+            
+            # If no existing letters, assign new one
+            if not group_letters:
+                group_letters.add(chr(ord('a') + current_letter))
+                current_letter += 1
+            
+            letter_groups[t1] = ''.join(sorted(group_letters))
+        
+        # Clean up - ensure proper ordering
+        # Highest mean should have 'a', lowest should have highest letter
+        final_groups = {}
+        sorted_by_mean = sorted(means.items(), key=lambda x: x[1], reverse=True)
+        assigned_letters = {}
+        next_letter = 0
+        
+        for t, mean in sorted_by_mean:
+            letters = set()
+            for other_t, other_mean in sorted_by_mean:
+                if abs(mean - other_mean) <= lsd:
+                    if other_t in assigned_letters:
+                        letters.update(assigned_letters[other_t])
             
             if not letters:
-                letters = {chr(ord('a') + len(set(letter_groups.values())))}
+                letters.add(chr(ord('a') + next_letter))
+                next_letter += 1
             
-            letter_groups[t1] = ''.join(sorted(letters))
+            assigned_letters[t] = letters
+            final_groups[t] = ''.join(sorted(letters))
         
-        return lsd, letter_groups
+        return lsd, final_groups
         
     except Exception as e:
-        st.warning(f"Error in Fisher's LSD calculation: {str(e)}")
         return None, {t: 'a' for t in data['Treatment'].unique()}
 
 def analyze_data(raw_data, treatment_map, parameters, alpha=0.05):
@@ -259,19 +282,25 @@ def analyze_data(raw_data, treatment_map, parameters, alpha=0.05):
     return statistics
 
 def create_excel_output(statistics):
-    """Create Excel file with statistics tables"""
+    """Create Excel file with statistics tables - no blank columns"""
     output = BytesIO()
     
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         for parameter, stats in statistics.items():
-            dates = stats['dates']
+            # Only include dates that have data
+            dates_with_data = [d for d in stats['dates'] 
+                             if d in stats['means'] and len(stats['means'][d]) > 0]
+            
+            if not dates_with_data:
+                continue
+            
             treatments = stats['treatment_names']
             
             # Create main table
             table_data = []
             for i, trt_num in enumerate(stats['treatments']):
                 row = [treatments[i]]
-                for date in dates:
+                for date in dates_with_data:
                     if date in stats['means'] and trt_num in stats['means'][date]:
                         mean = stats['means'][date][trt_num]
                         
@@ -285,34 +314,55 @@ def create_excel_output(statistics):
                         row.append('')
                 table_data.append(row)
             
-            df = pd.DataFrame(table_data, columns=['Treatment'] + dates)
+            df = pd.DataFrame(table_data, columns=['Treatment'] + dates_with_data)
             
-            # Add statistical rows
+            # Add statistical rows - matching GenStat format
+            blank_row = [''] * len(df.columns)
             p_row = ['P']
             lsd_row = ['LSD']
+            df_row = ['d.f.']
+            cv_row = ['%c.v.']
             
-            for date in dates:
+            for date in dates_with_data:
                 if date in stats['statistics']:
-                    p = stats['statistics'][date]['p_value']
+                    stat = stats['statistics'][date]
+                    
+                    # P-value
+                    p = stat.get('p_value')
                     if p is not None:
                         if p < 0.001:
                             p_row.append('<0.001')
-                        elif stats['statistics'][date]['significant']:
+                        elif stat.get('significant', False):
                             p_row.append(f"{p:.3f}")
                         else:
                             p_row.append('ns')
                     else:
                         p_row.append('ns')
+                    
+                    # LSD
+                    if stat.get('lsd'):
+                        lsd_row.append(f"{stat['lsd']:.2f}")
+                    else:
+                        lsd_row.append('-')
+                    
+                    # d.f. (degrees of freedom)
+                    if stat.get('df'):
+                        df_row.append(str(stat['df']))
+                    else:
+                        df_row.append('-')
+                    
+                    # %c.v. (coefficient of variation)
+                    if stat.get('cv'):
+                        cv_row.append(f"{stat['cv']:.1f}")
+                    else:
+                        cv_row.append('-')
                 else:
-                    p_row.append('')
-                
-                if date in stats['statistics'] and stats['statistics'][date]['lsd']:
-                    lsd_row.append(f"{stats['statistics'][date]['lsd']:.4f}")
-                else:
+                    p_row.append('ns')
                     lsd_row.append('-')
+                    df_row.append('-')
+                    cv_row.append('-')
             
-            blank_row = [''] * len(df.columns)
-            stat_df = pd.DataFrame([blank_row, p_row, lsd_row], columns=df.columns)
+            stat_df = pd.DataFrame([blank_row, p_row, lsd_row, df_row, cv_row], columns=df.columns)
             final_df = pd.concat([df, stat_df], ignore_index=True)
             
             final_df.to_excel(writer, sheet_name=parameter[:31], index=False)
@@ -349,7 +399,8 @@ with col1:
 with col2:
     st.header("⚙️ Settings")
     project_name = st.text_input("Project Name", "trial_analysis")
-    alpha = st.slider("Significance Level (α)", 0.01, 0.10, 0.05, 0.01)
+    alpha = st.slider("Significance Level (α)", 0.01, 0.15, 0.05, 0.01,
+                     help="P-value threshold for significance. Default is 0.05 (5%). Higher values are more lenient.")
 
 if uploaded_file is not None:
     
@@ -358,14 +409,10 @@ if uploaded_file is not None:
             # Read Excel file
             xl_file = pd.ExcelFile(uploaded_file)
             
-            st.write("**Debug: Sheet names found:**")
-            st.write(xl_file.sheet_names)
-            
             # Parse Trial Plan
             if 'Trial Plan' in xl_file.sheet_names:
                 trial_plan = pd.read_excel(uploaded_file, sheet_name='Trial Plan', header=None)
                 st.session_state.treatment_map = parse_trial_plan(trial_plan)
-                st.write(f"**Debug: Treatments found:** {st.session_state.treatment_map}")
             else:
                 st.error("No 'Trial Plan' sheet found!")
                 st.stop()
@@ -374,20 +421,14 @@ if uploaded_file is not None:
             date_sheets = [s for s in xl_file.sheet_names 
                           if s not in ['Trial Plan', 'Sheet1']]
             
-            st.write(f"**Debug: Assessment sheets to process:** {date_sheets}")
-            
             raw_data = {}
             for sheet_name in date_sheets:
                 df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None)
                 parsed_data = parse_assessment_sheet(df, sheet_name, st.session_state.treatment_map)
                 if parsed_data is not None and len(parsed_data) > 0:
                     raw_data[sheet_name] = parsed_data
-                    st.write(f"✓ Loaded {sheet_name}: {len(parsed_data)} plots")
-                else:
-                    st.warning(f"⚠ Could not parse sheet: {sheet_name}")
             
             st.session_state.raw_data = raw_data
-            st.write(f"**Debug: Total sheets loaded:** {len(raw_data)}")
             
             if len(raw_data) == 0:
                 st.error("No assessment data could be loaded from any sheets!")
@@ -395,7 +436,6 @@ if uploaded_file is not None:
                 
         except Exception as e:
             st.error(f"Error loading file: {str(e)}")
-            st.write("**Full error:**")
             st.exception(e)
             st.stop()
     
