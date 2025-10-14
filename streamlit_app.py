@@ -289,97 +289,123 @@ def analyze_data(raw_data, treatment_map, parameters, alpha=0.05):
 def create_excel_output(statistics):
     """Create Excel file with statistics tables - matching GenStat format exactly"""
     output = BytesIO()
+    sheets_written = 0
     
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        
         for parameter, stats in statistics.items():
-            # Use dates in correct chronological order
-            dates_with_data = [d for d in stats['dates'] 
-                             if d in stats['means'] and len(stats['means'][d]) > 0]
-            
-            if not dates_with_data:
-                continue
-            
-            treatments = stats['treatment_names']
-            dat_labels = [stats['dat_labels'][stats['dates'].index(d)] for d in dates_with_data]
-            
-            # Create main table with means and letter groups
-            table_data = []
-            for i, trt_num in enumerate(stats['treatments']):
-                row = [treatments[i]]
-                for date in dates_with_data:
-                    if date in stats['means'] and trt_num in stats['means'][date]:
-                        mean = stats['means'][date][trt_num]
-                        
-                        # Add letter group if exists (and not empty)
-                        letter = ''
-                        if (date in stats['letter_groups'] and 
-                            trt_num in stats['letter_groups'][date]):
-                            letter = stats['letter_groups'][date][trt_num]
-                        
-                        if letter and letter != '':
-                            row.append(f"{mean:.1f} {letter}")
-                        else:
-                            row.append(f"{mean:.1f}")
-                    else:
-                        row.append('')
-                table_data.append(row)
-            
-            # Create dataframe with date row
-            df = pd.DataFrame(table_data, columns=['Treatment'] + dates_with_data)
-            
-            # Insert DAT labels row at the top (after creating DataFrame)
-            dat_row = pd.DataFrame([[''] + dat_labels], columns=df.columns)
-            
-            # Add blank row, then statistical rows
-            blank_row = [''] * len(df.columns)
-            p_row = ['P']
-            lsd_row = ['LSD']
-            df_row = ['d.f.']
-            cv_row = ['%c.v.']
-            
-            for date in dates_with_data:
-                stat = stats['statistics'].get(date, {})
+            try:
+                # Use dates in correct chronological order
+                dates_with_data = [d for d in stats.get('dates', []) 
+                                 if d in stats.get('means', {}) and len(stats['means'][d]) > 0]
                 
-                # P-value
-                p = stat.get('p_value')
-                if p is not None:
-                    if p < 0.001:
-                        p_row.append('<0.001')
-                    elif stat.get('significant', False):
-                        p_row.append(f"{p:.3f}")
+                if not dates_with_data:
+                    continue
+                
+                treatments = stats.get('treatment_names', [])
+                if not treatments:
+                    continue
+                
+                # Get DAT labels for dates with data
+                try:
+                    dat_labels = [stats['dat_labels'][stats['dates'].index(d)] for d in dates_with_data]
+                except (KeyError, IndexError):
+                    # Fallback if dat_labels not available
+                    dat_labels = [''] * len(dates_with_data)
+                
+                # Create main table with means and letter groups
+                table_data = []
+                for i, trt_num in enumerate(stats['treatments']):
+                    row = [treatments[i]]
+                    for date in dates_with_data:
+                        if date in stats['means'] and trt_num in stats['means'][date]:
+                            mean = stats['means'][date][trt_num]
+                            
+                            # Add letter group if exists (and not empty)
+                            letter = ''
+                            if (date in stats.get('letter_groups', {}) and 
+                                trt_num in stats['letter_groups'][date]):
+                                letter = stats['letter_groups'][date][trt_num]
+                            
+                            if letter and letter != '':
+                                row.append(f"{mean:.1f} {letter}")
+                            else:
+                                row.append(f"{mean:.1f}")
+                        else:
+                            row.append('')
+                    table_data.append(row)
+                
+                if not table_data:
+                    continue
+                
+                # Create dataframe with date row
+                df = pd.DataFrame(table_data, columns=['Treatment'] + dates_with_data)
+                
+                # Insert DAT labels row at the top
+                dat_row = pd.DataFrame([[''] + dat_labels], columns=df.columns)
+                
+                # Add blank row, then statistical rows
+                blank_row = [''] * len(df.columns)
+                p_row = ['P']
+                lsd_row = ['LSD']
+                df_row = ['d.f.']
+                cv_row = ['%c.v.']
+                
+                for date in dates_with_data:
+                    stat = stats.get('statistics', {}).get(date, {})
+                    
+                    # P-value
+                    p = stat.get('p_value')
+                    if p is not None:
+                        if p < 0.001:
+                            p_row.append('<0.001')
+                        elif stat.get('significant', False):
+                            p_row.append(f"{p:.3f}")
+                        else:
+                            p_row.append('ns')
                     else:
                         p_row.append('ns')
-                else:
-                    p_row.append('ns')
-                
-                # LSD
-                if stat.get('lsd'):
-                    # Match GenStat precision (3 decimals for small numbers, 2 for larger)
-                    lsd_val = stat['lsd']
-                    if lsd_val < 10:
-                        lsd_row.append(f"{lsd_val:.3f}")
+                    
+                    # LSD
+                    if stat.get('lsd'):
+                        lsd_val = stat['lsd']
+                        if lsd_val < 10:
+                            lsd_row.append(f"{lsd_val:.3f}")
+                        else:
+                            lsd_row.append(f"{lsd_val:.2f}")
                     else:
-                        lsd_row.append(f"{lsd_val:.2f}")
-                else:
-                    lsd_row.append('-')
+                        lsd_row.append('-')
+                    
+                    # d.f.
+                    if stat.get('df') is not None:
+                        df_row.append(str(int(stat['df'])))
+                    else:
+                        df_row.append('-')
+                    
+                    # %c.v.
+                    if stat.get('cv') is not None:
+                        cv_row.append(f"{stat['cv']:.1f}")
+                    else:
+                        cv_row.append('-')
                 
-                # d.f.
-                if stat.get('df') is not None:
-                    df_row.append(str(int(stat['df'])))
-                else:
-                    df_row.append('-')
+                # Combine all rows
+                stat_df = pd.DataFrame([blank_row, p_row, lsd_row, df_row, cv_row], columns=df.columns)
+                final_df = pd.concat([dat_row, df, stat_df], ignore_index=True)
                 
-                # %c.v.
-                if stat.get('cv') is not None:
-                    cv_row.append(f"{stat['cv']:.1f}")
-                else:
-                    cv_row.append('-')
-            
-            # Combine all rows
-            stat_df = pd.DataFrame([blank_row, p_row, lsd_row, df_row, cv_row], columns=df.columns)
-            final_df = pd.concat([dat_row, df, stat_df], ignore_index=True)
-            
-            final_df.to_excel(writer, sheet_name=parameter[:31], index=False, header=True)
+                # Write to Excel
+                final_df.to_excel(writer, sheet_name=parameter[:31], index=False, header=True)
+                sheets_written += 1
+                
+            except Exception as e:
+                # Skip this parameter but continue with others
+                continue
+    
+    # Check if we wrote any sheets BEFORE closing writer
+    if sheets_written == 0:
+        # Reopen and create dummy sheet
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            dummy_df = pd.DataFrame({'Message': ['No data available to export']})
+            dummy_df.to_excel(writer, sheet_name='Info', index=False)
     
     output.seek(0)
     return output
@@ -556,14 +582,22 @@ if uploaded_file is not None:
         
         with col1:
             # Excel download
-            excel_file = create_excel_output(st.session_state.statistics)
-            st.download_button(
-                label="📊 Download Excel Statistics Tables",
-                data=excel_file,
-                file_name=f"{project_name}_statistics.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
+            try:
+                excel_file = create_excel_output(st.session_state.statistics)
+                st.download_button(
+                    label="📊 Download Excel Statistics Tables",
+                    data=excel_file,
+                    file_name=f"{project_name}_statistics.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error(f"Error generating Excel file: {str(e)}")
+                st.write("Debug info:")
+                st.write(f"Parameters with data: {list(st.session_state.statistics.keys())}")
+                for param, stats in st.session_state.statistics.items():
+                    dates = [d for d in stats['dates'] if d in stats.get('means', {})]
+                    st.write(f"  {param}: {len(dates)} dates with data")
         
         with col2:
             # HTML report placeholder
