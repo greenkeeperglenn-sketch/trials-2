@@ -112,29 +112,39 @@ def parse_assessment_sheet(df, sheet_name, treatment_map):
     return data_rows
 
 def calculate_fishers_lsd(data, parameter, alpha=0.05):
-    """Calculate Fisher's LSD and assign letter groups using proper algorithm"""
+    """Calculate Fisher's LSD and assign letter groups - FIXED algorithm"""
     try:
         treatments = sorted(data['Treatment'].unique())
         n_treatments = len(treatments)
         
-        # Get group data
-        groups = [data[data['Treatment'] == t][parameter].values for t in treatments]
-        means = {t: data[data['Treatment'] == t][parameter].mean() for t in treatments}
+        # Get group data and means
+        means = {}
+        groups = {}
+        for t in treatments:
+            group = data[data['Treatment'] == t][parameter].values
+            means[t] = np.mean(group)
+            groups[t] = group
         
         # Check for variation
-        all_values = np.concatenate(groups)
+        all_values = np.concatenate(list(groups.values()))
         if len(np.unique(all_values)) == 1:
             return None, {t: 'a' for t in treatments}
         
-        # Calculate MSE
-        ss_within = sum([np.sum((group - means[t])**2) for t, group in zip(treatments, groups)])
+        # Calculate MSE (Mean Square Error)
+        ss_within = 0
+        for t in treatments:
+            group_mean = means[t]
+            ss_within += np.sum((groups[t] - group_mean) ** 2)
+        
         df_within = len(data) - n_treatments
         
         if df_within <= 0 or ss_within == 0:
             return None, {t: 'a' for t in treatments}
         
         mse = ss_within / df_within
-        n_per_treatment = len(groups[0])
+        
+        # n per treatment (assuming balanced design)
+        n_per_treatment = len(groups[treatments[0]])
         
         if n_per_treatment == 0 or mse == 0:
             return None, {t: 'a' for t in treatments}
@@ -143,48 +153,43 @@ def calculate_fishers_lsd(data, parameter, alpha=0.05):
         t_critical = stats.t.ppf(1 - alpha/2, df_within)
         lsd = t_critical * np.sqrt(2 * mse / n_per_treatment)
         
-        # Proper letter grouping algorithm
-        sorted_means = sorted(means.items(), key=lambda x: x[1], reverse=True)
-        letter_groups = {}
-        current_letter = 0
+        # PROPER letter grouping algorithm
+        # Sort treatments by mean (highest to lowest)
+        sorted_treatments = sorted(treatments, key=lambda t: means[t], reverse=True)
         
-        for i, (t1, mean1) in enumerate(sorted_means):
-            # Find all treatments not significantly different from this one
-            group_letters = set()
-            
-            for j, (t2, mean2) in enumerate(sorted_means):
-                if abs(mean1 - mean2) <= lsd:
-                    # Not significantly different
-                    if t2 in letter_groups:
-                        # Already has letters, add them
-                        group_letters.update(letter_groups[t2])
-            
-            # If no existing letters, assign new one
-            if not group_letters:
-                group_letters.add(chr(ord('a') + current_letter))
-                current_letter += 1
-            
-            letter_groups[t1] = ''.join(sorted(group_letters))
+        # Create matrix of significant differences
+        sig_diff = {}
+        for i, t1 in enumerate(sorted_treatments):
+            sig_diff[t1] = set()
+            for j, t2 in enumerate(sorted_treatments):
+                if abs(means[t1] - means[t2]) > lsd:
+                    sig_diff[t1].add(t2)
         
-        # Clean up - ensure proper ordering
-        # Highest mean should have 'a', lowest should have highest letter
+        # Assign letters
+        letter_assignments = {}
+        available_letters = list('abcdefghijklmnopqrstuvwxyz')
+        letter_idx = 0
+        
+        for treatment in sorted_treatments:
+            # Find which letters this treatment can use
+            possible_letters = set()
+            
+            # Check all already-assigned treatments
+            for assigned_trt, assigned_letters in letter_assignments.items():
+                # If NOT significantly different, can share letters
+                if assigned_trt not in sig_diff[treatment]:
+                    possible_letters.update(assigned_letters)
+            
+            # If no compatible letters found, assign new letter
+            if not possible_letters:
+                possible_letters.add(available_letters[letter_idx])
+                letter_idx += 1
+            
+            letter_assignments[treatment] = possible_letters
+        
+        # Convert sets to sorted strings
         final_groups = {}
-        sorted_by_mean = sorted(means.items(), key=lambda x: x[1], reverse=True)
-        assigned_letters = {}
-        next_letter = 0
-        
-        for t, mean in sorted_by_mean:
-            letters = set()
-            for other_t, other_mean in sorted_by_mean:
-                if abs(mean - other_mean) <= lsd:
-                    if other_t in assigned_letters:
-                        letters.update(assigned_letters[other_t])
-            
-            if not letters:
-                letters.add(chr(ord('a') + next_letter))
-                next_letter += 1
-            
-            assigned_letters[t] = letters
+        for t, letters in letter_assignments.items():
             final_groups[t] = ''.join(sorted(letters))
         
         return lsd, final_groups
@@ -282,12 +287,12 @@ def analyze_data(raw_data, treatment_map, parameters, alpha=0.05):
     return statistics
 
 def create_excel_output(statistics):
-    """Create Excel file with statistics tables - no blank columns"""
+    """Create Excel file with statistics tables - matching GenStat format exactly"""
     output = BytesIO()
     
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         for parameter, stats in statistics.items():
-            # Only include dates that have data
+            # Use dates in correct chronological order
             dates_with_data = [d for d in stats['dates'] 
                              if d in stats['means'] and len(stats['means'][d]) > 0]
             
@@ -295,8 +300,9 @@ def create_excel_output(statistics):
                 continue
             
             treatments = stats['treatment_names']
+            dat_labels = [stats['dat_labels'][stats['dates'].index(d)] for d in dates_with_data]
             
-            # Create main table
+            # Create main table with means and letter groups
             table_data = []
             for i, trt_num in enumerate(stats['treatments']):
                 row = [treatments[i]]
@@ -304,19 +310,27 @@ def create_excel_output(statistics):
                     if date in stats['means'] and trt_num in stats['means'][date]:
                         mean = stats['means'][date][trt_num]
                         
+                        # Add letter group if exists (and not empty)
+                        letter = ''
                         if (date in stats['letter_groups'] and 
-                            trt_num in stats['letter_groups'][date] and
-                            stats['letter_groups'][date][trt_num] != 'ns'):
-                            row.append(f"{mean:.2f} {stats['letter_groups'][date][trt_num]}")
+                            trt_num in stats['letter_groups'][date]):
+                            letter = stats['letter_groups'][date][trt_num]
+                        
+                        if letter and letter != '':
+                            row.append(f"{mean:.1f} {letter}")
                         else:
-                            row.append(f"{mean:.2f}")
+                            row.append(f"{mean:.1f}")
                     else:
                         row.append('')
                 table_data.append(row)
             
+            # Create dataframe with date row
             df = pd.DataFrame(table_data, columns=['Treatment'] + dates_with_data)
             
-            # Add statistical rows - matching GenStat format
+            # Insert DAT labels row at the top (after creating DataFrame)
+            dat_row = pd.DataFrame([[''] + dat_labels], columns=df.columns)
+            
+            # Add blank row, then statistical rows
             blank_row = [''] * len(df.columns)
             p_row = ['P']
             lsd_row = ['LSD']
@@ -324,48 +338,48 @@ def create_excel_output(statistics):
             cv_row = ['%c.v.']
             
             for date in dates_with_data:
-                if date in stats['statistics']:
-                    stat = stats['statistics'][date]
-                    
-                    # P-value
-                    p = stat.get('p_value')
-                    if p is not None:
-                        if p < 0.001:
-                            p_row.append('<0.001')
-                        elif stat.get('significant', False):
-                            p_row.append(f"{p:.3f}")
-                        else:
-                            p_row.append('ns')
+                stat = stats['statistics'].get(date, {})
+                
+                # P-value
+                p = stat.get('p_value')
+                if p is not None:
+                    if p < 0.001:
+                        p_row.append('<0.001')
+                    elif stat.get('significant', False):
+                        p_row.append(f"{p:.3f}")
                     else:
                         p_row.append('ns')
-                    
-                    # LSD
-                    if stat.get('lsd'):
-                        lsd_row.append(f"{stat['lsd']:.2f}")
-                    else:
-                        lsd_row.append('-')
-                    
-                    # d.f. (degrees of freedom)
-                    if stat.get('df'):
-                        df_row.append(str(stat['df']))
-                    else:
-                        df_row.append('-')
-                    
-                    # %c.v. (coefficient of variation)
-                    if stat.get('cv'):
-                        cv_row.append(f"{stat['cv']:.1f}")
-                    else:
-                        cv_row.append('-')
                 else:
                     p_row.append('ns')
+                
+                # LSD
+                if stat.get('lsd'):
+                    # Match GenStat precision (3 decimals for small numbers, 2 for larger)
+                    lsd_val = stat['lsd']
+                    if lsd_val < 10:
+                        lsd_row.append(f"{lsd_val:.3f}")
+                    else:
+                        lsd_row.append(f"{lsd_val:.2f}")
+                else:
                     lsd_row.append('-')
+                
+                # d.f.
+                if stat.get('df') is not None:
+                    df_row.append(str(int(stat['df'])))
+                else:
                     df_row.append('-')
+                
+                # %c.v.
+                if stat.get('cv') is not None:
+                    cv_row.append(f"{stat['cv']:.1f}")
+                else:
                     cv_row.append('-')
             
+            # Combine all rows
             stat_df = pd.DataFrame([blank_row, p_row, lsd_row, df_row, cv_row], columns=df.columns)
-            final_df = pd.concat([df, stat_df], ignore_index=True)
+            final_df = pd.concat([dat_row, df, stat_df], ignore_index=True)
             
-            final_df.to_excel(writer, sheet_name=parameter[:31], index=False)
+            final_df.to_excel(writer, sheet_name=parameter[:31], index=False, header=True)
     
     output.seek(0)
     return output
